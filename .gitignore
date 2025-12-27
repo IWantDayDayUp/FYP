@@ -1,0 +1,65 @@
+# =========================================================
+# Global Ignore Rules for the ECG Foundation Model Project
+# ---------------------------------------------------------
+# We version control only:
+# - Source code (src/)
+# - Configurations (configs/)
+# - Scripts (scripts/)
+# - Documentation and notebooks
+#
+# We ignore:
+# - Large data files
+# - Generated training outputs (logs, checkpoints, etc.)
+# - System-specific and environment-specific files
+# =========================================================
+
+
+# ---------------------------------------------------------
+# Operating System temporary files
+# ---------------------------------------------------------
+.DS_Store            # macOS Finder metadata
+Thumbs.db            # Windows Explorer metadata
+
+
+# ---------------------------------------------------------
+# Python cache files
+# ---------------------------------------------------------
+*.pyc
+
+
+
+# ---------------------------------------------------------
+# Local virtual environments and package directories
+# ---------------------------------------------------------
+.venv/
+venv/
+env/
+
+
+# ---------------------------------------------------------
+# Machine learning datasets
+# Do NOT store raw or preprocessed data in GitHub
+# ---------------------------------------------------------
+data/
+
+
+# ---------------------------------------------------------
+# Outputs generated during training
+# These are large and change frequently
+# ---------------------------------------------------------
+logs/
+outputs/
+
+
+# ---------------------------------------------------------
+# Jupyter Notebook auto-save files
+# ---------------------------------------------------------
+.ipynb_checkpoints/
+
+
+# ---------------------------------------------------------
+# IDE / Editor configuration files
+# (Useful locally but not shared through Git)
+# ---------------------------------------------------------
+.vscode/
+.idea/
