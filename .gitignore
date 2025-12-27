@@ -40,7 +40,7 @@ env/
 # Machine learning datasets
 # Do NOT store raw or preprocessed data in GitHub
 # ---------------------------------------------------------
-data/
+# data/
 
 
 # ---------------------------------------------------------
