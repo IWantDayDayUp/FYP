@@ -4,7 +4,8 @@ import torch
 import numpy as np
 
 from pathlib import Path
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, ConcatDataset
+from typing import Optional, List
 
 
 class SingleNpyECGDataset(Dataset):
@@ -39,3 +40,43 @@ class SingleNpyECGDataset(Dataset):
         x = self.data[idx]  # [L]
         x = torch.from_numpy(x.copy()).float()  # [L] float32
         return x.unsqueeze(0)  # [1, L]
+
+
+def build_multidb_dataset(
+    npy_paths: List[str | Path],
+    data_root: str | Path | None = None,
+    limit_per_db: Optional[int] = None,
+) -> ConcatDataset:
+    """
+    Build a concatenated dataset from multiple .npy files or directories.
+
+    Each element in `npy_paths` can be:
+      - a single .npy file
+      - a directory containing multiple .npy shards
+    """
+    root = Path(data_root) if data_root else None
+    datasets: list[Dataset] = []
+
+    all_files: list[Path] = []
+
+    for p in npy_paths:
+        p = Path(p)
+        # prepend data_root if given and path is not absolute
+        if root is not None and not p.is_absolute():
+            p = root / p
+
+        if p.is_dir():
+            # use all .npy files in this directory
+            files = sorted(p.glob("*.npy"))
+            all_files.extend(files)
+        else:
+            all_files.append(p)
+
+    if not all_files:
+        raise ValueError("No .npy files found for MultiDB dataset")
+
+    for f in all_files:
+        ds = SingleNpyECGDataset(f, limit=limit_per_db)
+        datasets.append(ds)
+
+    return ConcatDataset(datasets)
