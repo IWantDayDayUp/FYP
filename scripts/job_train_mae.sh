@@ -22,18 +22,27 @@ print("cuda_available:", torch.cuda.is_available())
 print("device_name:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A")
 EOF
 
-# 如果你用的是 conda / venv，这里要激活环境（记得改成你自己的路径）
-# source ~/.conda/envs/fyp/bin/activate
 
-# 数据根目录：建议指到项目里的 data 目录
-# 之后 --npy 用相对这个目录的路径
+# ############### How to submit ###############
+# Step 1: Load anaconda3
+#     module load anaconda3
+#
+# Step 2: Activate FYP env
+#     conda activate fyp
+#
+# Step 3: Submit job to HPC
+#     cd path/to/FYP
+#     sbatch --partition=dev ./scripts/job_train_mae.sh
+#
+# Step 4: Check job state
+#     sacct -j jobid
+#
+# Step 5: Cancel job
+#     scancel jobid
+# ############### How to submit ###############
+
 export FYP_DATA_DIR="$HOME/scratch/data"
 
-# submit: sbatch --partition=dev ./job_train_mae.sh
-# check state: sacct -j jobid
-# cancel: scancel jobid
-
-# 这里调用的是新的入口脚本 train_mae.py
 python -u ./train_mae.py \
   --npy mitdb_singlelead_500hz_10s.npy \
   --out ./outputs \
