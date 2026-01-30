@@ -20,8 +20,8 @@ from sklearn.metrics import classification_report, confusion_matrix
 from ecg_fm.utils.io import make_run_dir, save_json
 from ecg_fm.utils.system import get_device_info, get_git_info
 
-from ecg_fm.data import PairsShardDataset
-from ecg_fm.models import build_model, list_models
+from ecg_fm.data.pairs_shard_dataset import PairsShardDataset
+from ecg_fm.models.registry import build_model, list_models
 
 
 # -----------------------------

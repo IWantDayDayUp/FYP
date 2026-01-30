@@ -9,6 +9,9 @@ if str(SRC) not in sys.path:
 
 from ecg_fm.training.cls_baseline import build_cls_argparser, train_classifier
 
+from ecg_fm.models.registry import list_models
+import ecg_fm.models  # triggers registrations via __init__.py
+
 
 def main() -> None:
     parser = build_cls_argparser()
@@ -18,4 +21,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+
+    print("Registered models:", list_models())
     main()

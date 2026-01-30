@@ -4,7 +4,9 @@ from __future__ import annotations
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .registry import register_model
+from ecg_fm.models.registry import register_model
+
+# 或者：from .registry import register_model  (相对导入也行)
 
 
 class CNN1D_Small(nn.Module):
