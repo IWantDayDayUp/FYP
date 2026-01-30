@@ -220,6 +220,33 @@ class ECGMAE_1D(nn.Module):
         pred = self.pred_head(dec_tokens)  # [B, T, N*P]
         return pred, target, mask
 
+    @torch.no_grad()
+    def encode(self, x: torch.Tensor, pool: str = "mean") -> torch.Tensor:
+        """
+        Encode ECG into latent representations for downstream tasks.
+
+        Args:
+            x: [B, N, L]
+            pool: "mean" | "none"
+        Returns:
+            z:
+              - if pool="none": [B, T, D]
+              - if pool="mean": [B, D]
+        """
+        tokens = self.patch_embed(x)  # [B, T, D]
+        tokens = self.pos_embed_enc(tokens)
+
+        h = tokens
+        for blk in self.encoder:
+            h = blk(h)  # [B, T, D]
+
+        if pool == "mean":
+            return h.mean(dim=1)  # [B, D]
+        elif pool == "none":
+            return h  # [B, T, D]
+        else:
+            raise ValueError(f"Unknown pool={pool}")
+
 
 def mae_loss_masked(
     pred_patches: torch.Tensor, target_patches: torch.Tensor, mask: torch.Tensor

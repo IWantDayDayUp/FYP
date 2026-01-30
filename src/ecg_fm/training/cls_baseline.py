@@ -92,6 +92,22 @@ def build_cls_argparser() -> argparse.ArgumentParser:
     )
     p.add_argument("--label-smoothing", type=float, default=0.0)
 
+    # FM
+    p.add_argument("--fm-ckpt", type=str, default=None, help="Path to FM checkpoint")
+    p.add_argument(
+        "--fm-feature",
+        type=str,
+        default="mean",
+        choices=["mean", "cls"],
+        help="How to pool FM features",
+    )
+    p.add_argument(
+        "--fm-unfreeze-last-n",
+        type=int,
+        default=0,
+        help="For finetune: unfreeze last N blocks",
+    )
+
     return p
 
 
@@ -294,7 +310,8 @@ def train_classifier(args: argparse.Namespace) -> None:
     # Model
     model = build_model(
         args.model,
-        num_classes=args.num_classes,
+        # num_classes=args.num_classes,
+        **vars(args),
     ).to(device)
 
     log(f"Available models: {list_models()}")
