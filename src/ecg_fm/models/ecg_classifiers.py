@@ -307,6 +307,144 @@ def build_fm_finetune(
     )
 
 
+class FMLSTMCNNHead(nn.Module):
+    """
+    FM -> token sequence -> BiLSTM -> pooling -> classifier
+    Input : x [B, 1, L]
+    Output: logits [B, num_classes]
+    """
+
+    def __init__(
+        self,
+        fm,  # ECGMAE_1D or wrapper containing it
+        num_classes: int,
+        lstm_hidden: int = 128,
+        lstm_layers: int = 2,
+        bidirectional: bool = True,
+        dropout: float = 0.1,
+        pool: str = "mean",  # pooling over time: mean for now
+    ):
+        super().__init__()
+
+        self.fm = fm
+        self.pool = pool
+
+        # FM embedding dim
+        d_model = getattr(fm, "d_model", None)
+        if d_model is None:
+            # if fm is wrapped, try fm.fm.d_model
+            d_model = getattr(getattr(fm, "fm", None), "d_model", None)
+        if d_model is None:
+            raise ValueError(
+                "Cannot infer FM d_model. Ensure fm has attribute d_model."
+            )
+
+        self.d_model = d_model
+
+        self.lstm = nn.LSTM(
+            input_size=d_model,
+            hidden_size=lstm_hidden,
+            num_layers=lstm_layers,
+            dropout=dropout if lstm_layers > 1 else 0.0,
+            bidirectional=bidirectional,
+            batch_first=True,
+        )
+
+        feat_dim = lstm_hidden * (2 if bidirectional else 1)
+
+        self.head = nn.Sequential(
+            nn.LayerNorm(feat_dim),
+            nn.Dropout(dropout),
+            nn.Linear(feat_dim, num_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, 1, L]
+
+        # Get token sequence from FM
+        # Prefer calling fm.encode directly (ECGMAE_1D)
+        if hasattr(self.fm, "encode"):
+            tok = self.fm.encode(x, pool="none")  # [B, T, D]
+        elif hasattr(self.fm, "fm") and hasattr(self.fm.fm, "encode"):
+            tok = self.fm.fm.encode(x, pool="none")
+        else:
+            raise ValueError("FM object does not support encode().")
+
+        y, _ = self.lstm(tok)  # [B, T, H*dir]
+
+        if self.pool == "mean":
+            feat = y.mean(dim=1)
+        else:
+            raise ValueError(f"Unknown pool={self.pool}")
+
+        return self.head(feat)
+
+
+def load_fm_full_model(ckpt_path: str):
+    import torch
+
+    # from ecg_fm.models.fm.ecg_mae_1d import ECGMAE_1D
+    from ecg_fm.models.mini_mae import ECGMAE_1D
+
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    a = ckpt["args"]
+
+    fm = ECGMAE_1D(
+        n_leads=1,
+        patch_size=a["patch_size"],
+        d_model=a["d_model"],
+        enc_depth=a["depth"],
+        dec_depth=2,  # decoder doesn't matter for downstream
+        n_heads=a["n_heads"],
+        dim_ff=a["dim_ff"],
+        dropout=a["dropout"],
+        mask_ratio=a["mask_ratio"],
+        pos_max_len=4096,
+    )
+
+    missing, unexpected = fm.load_state_dict(ckpt["model"], strict=False)
+    print(f"[FM load full] missing={len(missing)} unexpected={len(unexpected)}")
+    return fm
+
+
+@register_model("fm_lstm_cnn")
+def build_fm_lstm_cnn(
+    num_classes: int,
+    fm_ckpt: str = None,
+    fm_unfreeze_last_n: int = 0,
+    lstm_hidden: int = 128,
+    lstm_layers: int = 2,
+    dropout: float = 0.1,
+    **kwargs,
+) -> nn.Module:
+    # 1) Load FM (your already-working loader)
+    fm = load_fm_full_model(fm_ckpt)  # <-- 你需要提供这个：返回 ECGMAE_1D 实例（见下）
+
+    # 2) Freeze by default; optionally unfreeze last N encoder blocks
+    for p in fm.parameters():
+        p.requires_grad = False
+
+    if fm_unfreeze_last_n > 0:
+        # Unfreeze patch_embed + pos_embed_enc is optional; start conservative:
+        # unfreeze last N transformer blocks only
+        blocks = fm.encoder
+        n = min(fm_unfreeze_last_n, len(blocks))
+        for blk in blocks[-n:]:
+            for p in blk.parameters():
+                p.requires_grad = True
+
+    # 3) Build downstream head
+    return FMLSTMCNNHead(
+        fm=fm,
+        num_classes=num_classes,
+        lstm_hidden=lstm_hidden,
+        lstm_layers=lstm_layers,
+        bidirectional=True,
+        dropout=dropout,
+        pool="mean",
+    )
+
+
 # -----------------------------
 # 3) 1D-CNN classifier
 # -----------------------------
