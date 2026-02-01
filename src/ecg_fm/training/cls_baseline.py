@@ -81,9 +81,8 @@ def build_cls_argparser() -> argparse.ArgumentParser:
     p.add_argument("--input-len", type=int, default=300)
 
     # imbalance (baseline default: none)
-    p.add_argument(
-        "--use-class-weights", action="store_true", help="Enable weighted CE"
-    )
+    p.add_argument("--loss", type=str, default="ce", choices=["ce", "wce", "focal"])
+    p.add_argument("--focal-gamma", type=float, default=2.0)
     p.add_argument(
         "--weights-alpha",
         type=float,
@@ -134,12 +133,6 @@ def _load_xy_shards(data_root: Path, prefix: str):
     sizes = [len(a) for a in ys]
     offs = np.cumsum([0] + sizes)  # prefix sums, len = n_shards+1
     return Xs, ys, offs
-
-
-# def build_model(name: str, num_classes: int) -> nn.Module:
-#     if name == "cnn_small":
-#         return CNN1D_Small(num_classes)
-#     raise ValueError(f"Unknown model: {name}")
 
 
 # -----------------------------
@@ -209,13 +202,97 @@ def _train_epoch(
     return avg_loss, steps
 
 
-def _compute_tempered_weights(counts: np.ndarray, alpha: float) -> torch.Tensor:
-    # weight_c = (N / count_c)^alpha, then normalize to mean=1
+def compute_class_counts_from_pairs(
+    ds: "PairsShardDataset", num_classes: int
+) -> np.ndarray:
+    """
+    Fast class counting: only reads y_shard entries referenced by pairs.
+    Avoids loading X entirely.
+    """
+    counts = np.zeros(num_classes, dtype=np.int64)
+
+    for task_id, local_idx in ds.pairs:  # ds.pairs is int64
+        Xs, ys, offs = ds.task_xy[int(task_id)]
+
+        if len(offs) == 2:
+            shard_id = 0
+            in_shard = int(local_idx)
+        else:
+            shard_id = int(np.searchsorted(offs, int(local_idx), side="right") - 1)
+            in_shard = int(local_idx) - int(offs[shard_id])
+
+        y = int(ys[shard_id][in_shard])
+        if y < 0 or y >= num_classes:
+            raise ValueError(f"Invalid label y={y}, expected [0, {num_classes-1}]")
+        counts[y] += 1
+
+    return counts
+
+
+def compute_tempered_class_weights(
+    counts: np.ndarray,
+    alpha: float = 0.5,
+    eps: float = 1e-12,
+    clip_min: float | None = 0.2,
+    clip_max: float | None = 5.0,
+) -> np.ndarray:
+    """
+    w_c ∝ 1/(n_c^alpha), normalize to mean=1, optional clip, then renormalize.
+    """
     counts = counts.astype(np.float64)
-    counts[counts == 0] = 1.0
-    w = (counts.sum() / counts) ** alpha
-    w = w / w.mean()
-    return torch.tensor(w, dtype=torch.float32)
+    w = 1.0 / np.power(np.maximum(counts, 1.0), alpha)
+
+    # 1) normalize first (create meaningful relative scale)
+    w = w / (w.mean() + eps)
+
+    # 2) clip on the normalized scale (optional)
+    if clip_min is not None or clip_max is not None:
+        lo = -np.inf if clip_min is None else clip_min
+        hi = np.inf if clip_max is None else clip_max
+        w = np.clip(w, lo, hi)
+
+        # 3) renormalize again to keep mean=1
+        w = w / (w.mean() + eps)
+
+    return w
+
+
+class FocalLoss(nn.Module):
+    def __init__(self, gamma: float = 2.0, weight: torch.Tensor | None = None):
+        super().__init__()
+        self.gamma = float(gamma)
+        self.register_buffer("weight", weight if weight is not None else None)
+
+    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # logits: [B, C], target: [B]
+        logp = F.log_softmax(logits, dim=1)
+        p = torch.exp(logp)
+        pt = p.gather(1, target.unsqueeze(1)).squeeze(1)  # [B]
+        logpt = logp.gather(1, target.unsqueeze(1)).squeeze(1)  # [B]
+        loss = -((1.0 - pt) ** self.gamma) * logpt  # [B]
+        if self.weight is not None:
+            w = self.weight.gather(0, target)
+            loss = loss * w
+        return loss.mean()
+
+
+def build_criterion(args, train_counts: np.ndarray, device: str):
+    label_smoothing = float(getattr(args, "label_smoothing", 0.0))
+
+    if args.loss == "ce":
+        return nn.CrossEntropyLoss(label_smoothing=label_smoothing), None
+
+    if args.loss == "wce":
+        w_np = compute_tempered_class_weights(train_counts, alpha=args.weights_alpha)
+        w = torch.tensor(w_np, dtype=torch.float32, device=device)
+        return nn.CrossEntropyLoss(weight=w, label_smoothing=label_smoothing), w_np
+
+    if args.loss == "focal":
+        w_np = compute_tempered_class_weights(train_counts, alpha=args.weights_alpha)
+        w = torch.tensor(w_np, dtype=torch.float32, device=device)
+        return FocalLoss(gamma=args.focal_gamma, weight=w), w_np
+
+    raise ValueError(f"Unknown loss type: {args.loss}")
 
 
 def _f1_metrics(
@@ -294,6 +371,18 @@ def train_classifier(args: argparse.Namespace) -> None:
     ds_val = PairsShardDataset(pairs_val, tasks, data_root, args.input_len)
     ds_test = PairsShardDataset(pairs_test, tasks, data_root, args.input_len)
 
+    train_counts = compute_class_counts_from_pairs(
+        ds_train, num_classes=args.num_classes
+    )
+    log(f"[Counts] train_class_counts={train_counts.tolist()}")
+
+    criterion, w_np = build_criterion(args, train_counts, device)
+    log(
+        f"[Loss] type={args.loss} alpha={args.weights_alpha} gamma={getattr(args, 'focal_gamma', None)}"
+    )
+    if w_np is not None:
+        log(f"[Loss] class_weights={np.round(w_np, 6).tolist()}")
+
     dl_train = DataLoader(
         ds_train,
         batch_size=args.batch_size,
@@ -341,25 +430,6 @@ def train_classifier(args: argparse.Namespace) -> None:
 
     opt = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
-    )
-
-    # Compute class weights from TRAIN (fast: just count y by iterating once)
-    class_weights = None
-    if args.use_class_weights:
-        counts = np.zeros(args.num_classes, dtype=np.int64)
-        for _, yb in dl_train:
-            y_np = yb.numpy()
-            counts += np.bincount(y_np, minlength=args.num_classes)
-        w = _compute_tempered_weights(counts, alpha=args.weights_alpha)
-        class_weights = w.to(device)
-        log(f"Train class counts: {counts.tolist()}")
-        log(
-            f"Class weights (alpha={args.weights_alpha}): {w.cpu().numpy().round(4).tolist()}"
-        )
-
-    criterion = nn.CrossEntropyLoss(
-        weight=class_weights,
-        label_smoothing=float(args.label_smoothing),
     )
 
     # Save meta (immutable)
