@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report, confusion_matrix, f1_score
 
 from ecg_fm.utils.io import make_run_dir, save_json
 from ecg_fm.utils.system import get_device_info, get_git_info
@@ -218,6 +218,28 @@ def _compute_tempered_weights(counts: np.ndarray, alpha: float) -> torch.Tensor:
     return torch.tensor(w, dtype=torch.float32)
 
 
+def _f1_metrics(
+    y_true: np.ndarray, y_pred: np.ndarray, num_classes: int
+) -> Dict[str, object]:
+    """
+    Return macro/weighted F1 + per-class recall.
+    """
+    macro_f1 = float(f1_score(y_true, y_pred, average="macro", zero_division=0))
+    weighted_f1 = float(f1_score(y_true, y_pred, average="weighted", zero_division=0))
+
+    # per-class recall = TP / (TP + FN)
+    cm = confusion_matrix(y_true, y_pred, labels=list(range(num_classes)))
+    denom = cm.sum(axis=1)  # true counts per class
+    denom = np.clip(denom, 1, None)
+    per_class_recall = (np.diag(cm) / denom).astype(np.float64)
+
+    return {
+        "macro_f1": macro_f1,
+        "weighted_f1": weighted_f1,
+        "per_class_recall": per_class_recall.tolist(),
+    }
+
+
 def train_classifier(args: argparse.Namespace) -> None:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -369,6 +391,13 @@ def train_classifier(args: argparse.Namespace) -> None:
                 "train_loss",
                 "val_loss",
                 "val_acc",
+                "val_macro_f1",
+                "val_weighted_f1",
+                "val_recall_c0",
+                "val_recall_c1",
+                "val_recall_c2",
+                "val_recall_c3",
+                "val_recall_c4",
                 "epoch_sec",
                 "steps",
                 "gpu_mem_alloc_mb",
@@ -388,7 +417,11 @@ def train_classifier(args: argparse.Namespace) -> None:
         train_loss, steps = _train_epoch(
             model, dl_train, criterion, opt, device, max_steps=args.max_steps
         )
-        val_loss, val_acc, _, _ = _eval_epoch(model, dl_val, criterion, device)
+        val_loss, val_acc, yv, pv = _eval_epoch(model, dl_val, criterion, device)
+        val_m = _f1_metrics(yv, pv, num_classes=args.num_classes)
+        val_macro_f1 = val_m["macro_f1"]
+        val_weighted_f1 = val_m["weighted_f1"]
+        val_recalls = val_m["per_class_recall"]
 
         epoch_sec = time.time() - epoch_start
         gpu_alloc = (
@@ -398,7 +431,10 @@ def train_classifier(args: argparse.Namespace) -> None:
         )
 
         log(
-            f"Epoch {epoch:02d} | train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | val_acc={val_acc:.4f}"
+            f"Epoch {epoch:02d} | train_loss={train_loss:.4f} | "
+            f"val_loss={val_loss:.4f} | val_acc={val_acc:.4f} | "
+            f"val_macro_f1={val_macro_f1:.4f} | val_weighted_f1={val_weighted_f1:.4f} | "
+            f"val_recall={np.array(val_recalls).round(4).tolist()}"
         )
 
         with open(metrics_path, "a", newline="") as f:
@@ -408,6 +444,13 @@ def train_classifier(args: argparse.Namespace) -> None:
                     f"{train_loss:.6f}",
                     f"{val_loss:.6f}",
                     f"{val_acc:.6f}",
+                    f"{val_macro_f1:.6f}",
+                    f"{val_weighted_f1:.6f}",
+                    f"{val_recalls[0]:.6f}",
+                    f"{val_recalls[1]:.6f}",
+                    f"{val_recalls[2]:.6f}",
+                    f"{val_recalls[3]:.6f}",
+                    f"{val_recalls[4]:.6f}",
                     f"{epoch_sec:.3f}",
                     steps,
                     gpu_alloc,
@@ -445,6 +488,12 @@ def train_classifier(args: argparse.Namespace) -> None:
     test_loss, test_acc, yt, pt = _eval_epoch(model, dl_test, criterion, device)
     log(f"[TEST] loss={test_loss:.4f} acc={test_acc:.4f}")
 
+    test_m = _f1_metrics(yt, pt, num_classes=args.num_classes)
+    log(
+        f"[TEST] macro_f1={test_m['macro_f1']:.4f} weighted_f1={test_m['weighted_f1']:.4f} "
+        f"per_class_recall={np.array(test_m['per_class_recall']).round(4).tolist()}"
+    )
+
     # Save reports
     report = classification_report(yt, pt, output_dict=True, zero_division=0)
     report_path = run_dir / "test_classification_report.json"
@@ -464,11 +513,15 @@ def train_classifier(args: argparse.Namespace) -> None:
         "paths": {
             "meta": str(meta_path),
             "metrics": str(metrics_path),
+            "confusion_matrix": str(run_dir / "confusion_matrix.csv"),
             "log": str(log_path),
             "ckpt_best": str(best_path),
             "ckpt_last": str(last_path),
             "report": str(report_path),
         },
+        "test_macro_f1": float(test_m["macro_f1"]),
+        "test_weighted_f1": float(test_m["weighted_f1"]),
+        "test_per_class_recall": test_m["per_class_recall"],
     }
     save_json(summary_path, summary)
     log(
