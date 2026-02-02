@@ -13,7 +13,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
 
@@ -56,6 +56,20 @@ def build_cls_argparser() -> argparse.ArgumentParser:
     p.add_argument("--out", type=str, default="./outputs", help="Output root directory")
     p.add_argument(
         "--run-name", type=str, default="", help="Run name (default timestamp)"
+    )
+
+    # sampling strategy (for imbalance handling)
+    p.add_argument(
+        "--sampling",
+        type=str,
+        default="none",
+        choices=["none", "wrs"],
+        help="Train sampling: none (shuffle) | wrs (WeightedRandomSampler)",
+    )
+    p.add_argument(
+        "--sampling-replacement",
+        action="store_true",
+        help="Use replacement sampling for WRS (recommended).",
     )
 
     # training
@@ -229,6 +243,31 @@ def compute_class_counts_from_pairs(
     return counts
 
 
+def compute_labels_from_pairs(ds: "PairsShardDataset", num_classes: int) -> np.ndarray:
+    """
+    Return labels aligned with ds.pairs (len = len(pairs)).
+    Only reads y from shards (fast, no X load).
+    """
+    labels = np.zeros(len(ds.pairs), dtype=np.int64)
+
+    for i, (task_id, local_idx) in enumerate(ds.pairs):
+        Xs, ys, offs = ds.task_xy[int(task_id)]
+
+        if len(offs) == 2:
+            shard_id = 0
+            in_shard = int(local_idx)
+        else:
+            shard_id = int(np.searchsorted(offs, int(local_idx), side="right") - 1)
+            in_shard = int(local_idx) - int(offs[shard_id])
+
+        y = int(ys[shard_id][in_shard])
+        if y < 0 or y >= num_classes:
+            raise ValueError(f"Invalid label y={y}, expected [0, {num_classes-1}]")
+        labels[i] = y
+
+    return labels
+
+
 def compute_tempered_class_weights(
     counts: np.ndarray,
     alpha: float = 0.5,
@@ -383,10 +422,47 @@ def train_classifier(args: argparse.Namespace) -> None:
     if w_np is not None:
         log(f"[Loss] class_weights={np.round(w_np, 6).tolist()}")
 
+        # -----------------------------
+    # Train sampler (imbalance handling)
+    # -----------------------------
+    sampler = None
+    shuffle = True
+
+    if args.sampling == "wrs":
+        # 1) labels for each training pair
+        train_labels = compute_labels_from_pairs(ds_train, num_classes=args.num_classes)
+
+        # 2) class weights (same as your WCE weights)
+        w_cls = compute_tempered_class_weights(train_counts, alpha=args.weights_alpha)
+        log(f"[Sampling] type=wrs alpha={args.weights_alpha}")
+        log(f"[Sampling] class_weights={np.round(w_cls, 6).tolist()}")
+
+        # 3) per-sample weights
+        w_samples = w_cls[train_labels].astype(np.float64)
+        w_samples = torch.from_numpy(w_samples)
+
+        sampler = WeightedRandomSampler(
+            weights=w_samples,
+            num_samples=len(ds_train),  # keep epoch size unchanged
+            replacement=bool(args.sampling_replacement),
+        )
+        shuffle = False  # IMPORTANT: sampler and shuffle are mutually exclusive
+
+    # dl_train = DataLoader(
+    #     ds_train,
+    #     batch_size=args.batch_size,
+    #     shuffle=True,
+    #     num_workers=args.num_workers,
+    #     pin_memory=(device == "cuda"),
+    #     drop_last=False,
+    #     persistent_workers=(args.num_workers > 0),
+    #     prefetch_factor=4 if args.num_workers > 0 else None,
+    # )
     dl_train = DataLoader(
         ds_train,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=shuffle,
+        sampler=sampler,
         num_workers=args.num_workers,
         pin_memory=(device == "cuda"),
         drop_last=False,
