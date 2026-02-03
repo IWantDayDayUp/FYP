@@ -32,7 +32,8 @@ EOF
 #
 # Step 3: Submit job to HPC
 #     cd path/to/FYP
-#     sbatch --partition=dev ./scripts/job_train_mae.sh
+#     sbatch --partition=dev ./scripts/your_script_name.sh
+#     sbatch --partition=gpu ./scripts/your_script_name.sh
 #
 # Step 4: Check job state
 #     sacct -j jobid
