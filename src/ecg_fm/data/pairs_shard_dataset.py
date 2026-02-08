@@ -52,6 +52,28 @@ class PairsShardDataset(Dataset):
     def __len__(self):
         return len(self.pairs)
 
+    # def __getitem__(self, i):
+    #     task_id, local_idx = self.pairs[i]
+    #     Xs, ys, offs = self.task_xy[int(task_id)]
+
+    #     if len(offs) == 2:
+    #         shard_id = 0
+    #         in_shard = int(local_idx)
+    #     else:
+    #         shard_id = int(np.searchsorted(offs, int(local_idx), side="right") - 1)
+    #         in_shard = int(local_idx) - int(offs[shard_id])
+
+    #     x = np.array(Xs[shard_id][in_shard], dtype=np.float32)
+    #     if not np.isfinite(x).all():
+    #         x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+
+    #     y = int(ys[shard_id][in_shard])
+
+    #     return (
+    #         torch.from_numpy(x).unsqueeze(0),  # [1, L]
+    #         torch.tensor(y).long(),
+    #     )
+
     def __getitem__(self, i):
         task_id, local_idx = self.pairs[i]
         Xs, ys, offs = self.task_xy[int(task_id)]
@@ -63,13 +85,22 @@ class PairsShardDataset(Dataset):
             shard_id = int(np.searchsorted(offs, int(local_idx), side="right") - 1)
             in_shard = int(local_idx) - int(offs[shard_id])
 
-        x = np.array(Xs[shard_id][in_shard], dtype=np.float32)
-        if not np.isfinite(x).all():
-            x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        x_np = Xs[shard_id][in_shard]  # memmap slice, shape could be [1, L] or [L]
+        # ---- HARDEN: force contiguous, writable CPU memory ----
+        x_np = np.asarray(x_np, dtype=np.float32)
+        x_np = np.nan_to_num(x_np, nan=0.0, posinf=0.0, neginf=0.0)
+        x_np = np.ascontiguousarray(x_np)  # ensure contiguous
+        x_np = x_np.copy()  # ensure owning, resizable storage
+
+        # shape normalize:
+        # - if shard stores [1, L], keep it
+        # - if shard stores [L], add channel dim
+        if x_np.ndim == 1:
+            x_np = x_np[None, :]  # [1, L]
 
         y = int(ys[shard_id][in_shard])
 
-        return (
-            torch.from_numpy(x).unsqueeze(0),  # [1, L]
-            torch.tensor(y).long(),
-        )
+        x = torch.from_numpy(x_np)  # [1, L]
+        y = torch.tensor(y, dtype=torch.long)
+
+        return x, y

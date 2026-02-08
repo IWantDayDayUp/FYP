@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import List
+import numpy as np
 
 import torch
 from torch.utils.data import DataLoader
@@ -66,6 +67,39 @@ def build_mae_multidb_argparser() -> argparse.ArgumentParser:
     return parser
 
 
+def quick_dataset_sanity(ds, n=2048, seed=0):
+    rng = np.random.default_rng(seed)
+    idxs = rng.integers(0, len(ds), size=min(n, len(ds)))
+
+    bad = 0
+    min_v, max_v = 1e9, -1e9
+    for i in idxs:
+        x = ds[i]  # expect torch.Tensor [1, L] or numpy [L]
+        if isinstance(x, tuple):
+            x = x[0]
+        if isinstance(x, torch.Tensor):
+            x = x.detach().cpu().numpy()
+
+        x = np.asarray(x)
+        if x.ndim == 2:
+            x = x[0]
+        if not np.isfinite(x).all():
+            bad += 1
+            if bad <= 3:
+                where = np.where(~np.isfinite(x))[0][:10]
+                print(
+                    f"[SANITY] non-finite at sample {i}, first idx={where}, values={x[where]}"
+                )
+            continue
+
+        min_v = min(min_v, float(x.min()))
+        max_v = max(max_v, float(x.max()))
+
+    print(
+        f"[SANITY] checked={len(idxs)} bad_nonfinite={bad} min={min_v:.5f} max={max_v:.5f}"
+    )
+
+
 def train_mae_multidb(args: argparse.Namespace) -> None:
     torch.manual_seed(args.seed)
 
@@ -116,6 +150,7 @@ def train_mae_multidb(args: argparse.Namespace) -> None:
         npy_list, data_root=args.data_root, limit_per_db=limit_per_db
     )
     log(f"MultiDB dataset length: {len(ds)}")
+    quick_dataset_sanity(ds, n=4096, seed=42)
 
     # infer L from one sample
     x0 = ds[0]  # [1, L]

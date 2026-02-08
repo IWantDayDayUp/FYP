@@ -67,7 +67,8 @@ def build_multidb_dataset(
 
         if p.is_dir():
             # use all .npy files in this directory
-            files = sorted(p.glob("*.npy"))
+            # files = sorted(p.glob("*.npy"))
+            files = sorted(p.glob("*_X_shard*.npy"))
             all_files.extend(files)
         else:
             all_files.append(p)

@@ -836,8 +836,27 @@ def train_classifier(args: argparse.Namespace) -> None:
         pin_memory=(device == "cuda"),
         drop_last=False,
         persistent_workers=(args.num_workers > 0),
-        prefetch_factor=4 if args.num_workers > 0 else 2,
+        # prefetch_factor=4 if args.num_workers > 0 else 2,
+        prefetch_factor=2 if args.num_workers > 0 else None,
     )
+    # ===== DEBUG: inspect one batch =====
+    xb0, yb0 = next(iter(dl_train))
+    log(
+        f"[DEBUG] xb shape={tuple(xb0.shape)} dtype={xb0.dtype} "
+        f"min={float(xb0.min()):.4f} max={float(xb0.max()):.4f} mean={float(xb0.mean()):.4f} std={float(xb0.std()):.4f}"
+    )
+    log(
+        f"[DEBUG] yb shape={tuple(yb0.shape)} dtype={yb0.dtype} unique={np.unique(yb0.numpy(), return_counts=True)}"
+    )
+
+    # hard assertions (fail fast)
+    assert xb0.ndim in (2, 3), f"Unexpected xb dims: {xb0.ndim}"
+    # common: [B, L] or [B, C, L]
+    L = xb0.shape[-1]
+    assert (
+        L == args.input_len
+    ), f"Input length mismatch: got {L}, expected {args.input_len}"
+
     dl_val = DataLoader(
         ds_val,
         batch_size=args.batch_size,
@@ -858,6 +877,10 @@ def train_classifier(args: argparse.Namespace) -> None:
         persistent_workers=(args.num_workers > 0),
         prefetch_factor=4 if args.num_workers > 0 else None,
     )
+    val_counts = compute_class_counts_from_pairs(ds_val, num_classes=args.num_classes)
+    test_counts = compute_class_counts_from_pairs(ds_test, num_classes=args.num_classes)
+    log(f"Val class counts: {val_counts.tolist()}")
+    log(f"Test class counts: {test_counts.tolist()}")
 
     log(f"Tasks: {tasks}")
     log(f"Data root: {data_root}")
